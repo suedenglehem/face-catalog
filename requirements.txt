@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+psycopg[binary]
+pgvector
+numpy
+pillow
+rawpy
+python-dotenv
+insightface
+onnxruntime-gpu
+opencv-python-headless

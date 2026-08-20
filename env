@@ -1,0 +1,19 @@
+DATABASE_URL=postgresql://facecat:facecat@127.0.0.1:5432/facecat
+
+THUMBS_DIR=$PWD/thumbs
+
+MODEL_NAME=buffalo_l
+GPU_DEVICE_ID=0
+DET_SIZE=640
+MAX_DETECT_SIDE=1600
+
+ALLOW_CPU_RESIZE=1
+
+GROUP_K=20
+GROUP_THRESHOLD=0.55
+SEARCH_LIMIT=50
+
+export LD_LIBRARY_PATH=/usr/local/cuda-12.5/lib64:${LD_LIBRARY_PATH:-}
+export PATH=/usr/local/cuda-12.5/bin:${PATH}
+
+export CUDA_VISIBLE_DEVICES=1
