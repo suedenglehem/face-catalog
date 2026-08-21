@@ -4,8 +4,8 @@ from html import escape
 from io import BytesIO
 
 import numpy as np
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 
@@ -16,7 +16,8 @@ from .vision import FaceEngine
 app = FastAPI(title="Face Catalog")
 app.mount("/thumbs", StaticFiles(directory=str(config.THUMBS_DIR)), name="thumbs")
 
-ENGINE = FaceEngine()
+# Web search engine is pinned to the first GPU; indexing uses its own pool.
+ENGINE = FaceEngine(ctx_id=config.GPUS[0])
 
 
 def page(title: str, body: str) -> HTMLResponse:
@@ -24,116 +25,134 @@ def page(title: str, body: str) -> HTMLResponse:
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>__TITLE__</title>
-  <style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
     body {
-      margin: 0;
-      font-family: system-ui, sans-serif;
-      background: #0f172a;
-      color: #e5e7eb;
+    margin: 0;
+    font-family: system-ui, sans-serif;
+    background: #0f172a;
+    color: #e5e7eb;
     }
     .wrap {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 24px;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px;
     }
     .nav {
-      margin-bottom: 20px;
+    margin-bottom: 20px;
     }
     .nav a {
-      color: #93c5fd;
-      text-decoration: none;
-      margin-right: 16px;
+    color: #93c5fd;
+    text-decoration: none;
+    margin-right: 16px;
     }
     .card {
-      background: #111827;
-      border: 1px solid #334155;
-      border-radius: 12px;
-      padding: 20px;
-      margin-bottom: 18px;
+    background: #111827;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 18px;
     }
     h1, h2, h3 {
-      margin-top: 0;
+    margin-top: 0;
     }
     .muted {
-      color: #94a3b8;
+    color: #94a3b8;
     }
     .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
     }
     .result {
-      border: 1px solid #334155;
-      border-radius: 12px;
-      padding: 14px;
-      background: #1f2937;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 14px;
+    background: #1f2937;
     }
     .thumb-row {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin-bottom: 12px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
     }
     img.thumb {
-      max-width: 220px;
-      max-height: 220px;
-      border-radius: 10px;
-      border: 1px solid #334155;
-      background: #000;
+    max-width: 220px;
+    max-height: 220px;
+    border-radius: 10px;
+    border: 1px solid #334155;
+    background: #000;
     }
     code {
-      background: #0b1220;
-      border: 1px solid #334155;
-      border-radius: 6px;
-      padding: 2px 6px;
+    background: #0b1220;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 2px 6px;
     }
     table {
-      width: 100%;
-      border-collapse: collapse;
+    width: 100%;
+    border-collapse: collapse;
     }
     th, td {
-      padding: 10px 8px;
-      border-bottom: 1px solid #334155;
-      text-align: left;
-      vertical-align: top;
+    padding: 10px 8px;
+    border-bottom: 1px solid #334155;
+    text-align: left;
+    vertical-align: top;
     }
     input[type="file"] {
-      margin-right: 12px;
+    margin-right: 12px;
     }
     button {
-      padding: 10px 14px;
-      border: 0;
-      border-radius: 8px;
-      background: #60a5fa;
-      color: #08111f;
-      font-weight: 700;
-      cursor: pointer;
+    padding: 10px 14px;
+    border: 0;
+    border-radius: 8px;
+    background: #60a5fa;
+    color: #08111f;
+    font-weight: 700;
+    cursor: pointer;
+    }
+    .btn-sm {
+    padding: 6px 10px;
+    font-size: 13px;
+    background: #f87171;
+    margin-top: 8px;
+    }
+    .btn-sm.restore {
+    background: #34d399;
+    }
+    .badge-invalid {
+    display: inline-block;
+    background: #7f1d1d;
+    color: #fecaca;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 12px;
+    margin-left: 8px;
     }
     .kvs {
-      margin-top: 10px;
-      font-size: 14px;
-      line-height: 1.5;
+    margin-top: 10px;
+    font-size: 14px;
+    line-height: 1.5;
     }
     .kvs div {
-      margin-bottom: 4px;
+    margin-bottom: 4px;
     }
-  </style>
+</style>
 </head>
 <body>
-  <div class="wrap">
+<div class="wrap">
     <div class="nav">
-      <a href="/">Search</a>
-      <a href="/groups">Groups</a>
-      <a href="/admin">Admin</a>
+    <a href="/">Search</a>
+    <a href="/groups">Groups</a>
+    <a href="/admin">Admin</a>
     </div>
     <div class="card">
-      <h1>__TITLE__</h1>
-      __BODY__
+    <h1>__TITLE__</h1>
+    __BODY__
     </div>
-  </div>
+</div>
 </body>
 </html>
 """
@@ -182,8 +201,8 @@ def exif_block(exif: dict) -> str:
 def home_body() -> str:
     return """
 <form action="/search" method="post" enctype="multipart/form-data">
-  <input type="file" name="file" accept="image/*" required>
-  <button type="submit">Search by face</button>
+<input type="file" name="file" accept="image/*" required>
+<button type="submit">Search by face</button>
 </form>
 
 <p class="muted">
@@ -212,7 +231,7 @@ def search_db(embedding, limit: int) -> list[dict]:
                 left join face_group_members gm on gm.face_id = f.id
                 left join face_groups g on g.id = gm.group_id
                 where f.invalidated = false
-                  and fi.is_deleted = false
+                and fi.is_deleted = false
                 order by f.embedding <=> %s::vector
                 limit %s
                 """,
@@ -258,6 +277,10 @@ def render_search_results(rows: list[dict]) -> str:
             f'{group_html}'
             f'<div class="thumb-row">{face_thumb}{file_thumb}</div>'
             f'<h3>EXIF</h3>{exif_block(exif)}'
+            '<form method="post" action="/faces/' + str(int(row["face_id"])) + '/toggle">'
+            '<input type="hidden" name="next" value="/">'
+            '<button class="btn-sm" type="submit">Invalidate match</button>'
+            '</form>'
             '</div>'
         )
 
@@ -335,6 +358,7 @@ def load_group_detail(group_id: int) -> tuple[dict | None, list[dict]]:
                 select
                     f.id as face_id,
                     f.face_thumb_rel,
+                    f.invalidated,
                     fi.file_thumb_rel,
                     fi.abs_path,
                     fi.exif,
@@ -343,7 +367,7 @@ def load_group_detail(group_id: int) -> tuple[dict | None, list[dict]]:
                 join faces f on f.id = gm.face_id
                 join files fi on fi.id = f.file_id
                 where gm.group_id = %s
-                  and fi.is_deleted = false
+                and fi.is_deleted = false
                 order by gm.score_to_rep desc nulls last, f.id
                 """,
                 (group_id,),
@@ -385,13 +409,21 @@ def render_group_detail(group_row: dict, members: list[dict]) -> str:
 
         exif = row.get("exif") or {}
 
+        invalid_badge = '<span class="badge-invalid">invalidated</span>' if row.get("invalidated") else ""
+        btn_class = "btn-sm restore" if row.get("invalidated") else "btn-sm"
+        btn_label = "Restore match" if row.get("invalidated") else "Invalidate match"
+
         parts.append(
             '<div class="result">'
-            f'<div><strong>Face ID:</strong> {int(row["face_id"])}</div>'
+            f'<div><strong>Face ID:</strong> {int(row["face_id"])}{invalid_badge}</div>'
             f'<div><strong>Score to representative:</strong> {float(row["score_to_rep"]):.4f}</div>'
             f'<div><strong>File:</strong> <code>{escape(str(row["abs_path"]))}</code></div>'
             f'<div class="thumb-row">{face_thumb}{file_thumb}</div>'
             f'<h3>EXIF</h3>{exif_block(exif)}'
+            '<form method="post" action="/faces/' + str(int(row["face_id"])) + '/toggle">'
+            '<input type="hidden" name="next" value="/groups/' + str(group_row["id"]) + '">'
+            f'<button class="{btn_class}" type="submit">{btn_label}</button>'
+            '</form>'
             '</div>'
         )
 
@@ -424,13 +456,27 @@ def load_admin() -> dict:
             )
             roots = cur.fetchall()
 
+    db_size_bytes = db.database_size_bytes()
+    jobs = db.get_latest_jobs(10)
+
     return {
         "roots_count": roots_count,
         "files_count": files_count,
         "faces_count": faces_count,
         "groups_count": groups_count,
+        "db_size_bytes": db_size_bytes,
+        "jobs": jobs,
         "roots": roots,
     }
+
+
+def _human_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def render_admin(data: dict) -> str:
@@ -441,13 +487,52 @@ def render_admin(data: dict) -> str:
         f"<tr><th>Files</th><td>{data['files_count']}</td></tr>",
         f"<tr><th>Faces</th><td>{data['faces_count']}</td></tr>",
         f"<tr><th>Groups</th><td>{data['groups_count']}</td></tr>",
+        f"<tr><th>Database size</th><td>{_human_size(data['db_size_bytes'])}</td></tr>",
         "</tbody>",
         "</table>",
-        "<h2>Registered roots</h2>",
-        "<table>",
-        "<thead><tr><th>ID</th><th>Path</th><th>Last indexed</th></tr></thead>",
-        "<tbody>",
+
+        "<h2>Indexation / reindexation history (jobs)</h2>",
     ]
+
+    if data["jobs"]:
+        parts.append(
+            "<table>"
+            "<thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Started</th><th>Finished</th><th>Stats</th></tr></thead>"
+            "<tbody>"
+        )
+        for job in data["jobs"]:
+            stats = job.get("stats") or {}
+            if isinstance(stats, dict):
+                stats_text = ", ".join(f"{k}={v}" for k, v in stats.items() if k != "done_blocks")
+                done_blocks = stats.get("done_blocks")
+                if done_blocks:
+                    stats_text += f", blocks_done={len(done_blocks)}"
+            else:
+                stats_text = str(stats)
+            parts.append(
+                "<tr>"
+                f"<td>{int(job['id'])}</td>"
+                f"<td>{escape(str(job['job_type']))}</td>"
+                f"<td>{escape(str(job['status']))}"
+                + (f" ({escape(str(job['error']))})" if job.get("error") else "")
+                + "</td>"
+                f"<td>{escape(str(job['started_at']))}</td>"
+                f"<td>{escape(str(job['finished_at']))}</td>"
+                f"<td class='muted'>{escape(stats_text)}</td>"
+                "</tr>"
+            )
+        parts.append("</tbody></table>")
+    else:
+        parts.append('<p class="muted">No jobs recorded yet.</p>')
+
+    parts.extend(
+        [
+            "<h2>Registered roots</h2>",
+            "<table>",
+            "<thead><tr><th>ID</th><th>Path</th><th>Last indexed</th></tr></thead>",
+            "<tbody>",
+        ]
+    )
 
     for row in data["roots"]:
         parts.append(
@@ -463,8 +548,9 @@ def render_admin(data: dict) -> str:
             "</tbody></table>",
             "<h2>CLI workflow</h2>",
             '<p><code>python -m facecat.index_cli add-root /path/to/photos</code></p>',
-            '<p><code>python -m facecat.index_cli index-all</code></p>',
-            '<p><code>python -m facecat.group_cli rebuild</code></p>',
+            '<p><code>python -m facecat.index_cli index-all --threads-per-gpu 4</code></p>',
+            '<p><code>python -m facecat.group_cli rebuild --threads-per-gpu 4</code></p>',
+            '<p class="muted">Both commands are crash-resumable: re-run the same command to continue an interrupted job.</p>',
         ]
     )
 
@@ -498,6 +584,23 @@ def group_detail(group_id: int):
     if group_row is None:
         return page("Group not found", f"<p>Group #{group_id} was not found.</p>")
     return page(f"Group #{group_id}", render_group_detail(group_row, members))
+
+
+@app.post("/faces/{face_id}/toggle")
+def toggle_face(face_id: int, next: str = Form(...)):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "update faces set invalidated = not invalidated where id = %s returning invalidated",
+                (face_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    if row is None:
+        return RedirectResponse(url="/", status_code=303)
+    print(f"[web] face {face_id} -> invalidated={bool(row['invalidated'])}")
+    return RedirectResponse(url=next or "/", status_code=303)
 
 
 @app.get("/admin", response_class=HTMLResponse)

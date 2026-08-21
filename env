@@ -13,7 +13,17 @@ GROUP_K=20
 GROUP_THRESHOLD=0.55
 SEARCH_LIMIT=50
 
+# --- multi-GPU indexing / grouping (defaults; CLI flags override) ---
+THREADS_PER_GPU=4
+INDEX_CPU_WORKERS=8
+INDEX_DECODE_QUEUE=16
+INDEX_GPU_QUEUE=8
+GROUP_BLOCK_SIZE=512
+KNN_CHUNK=0
+
 export LD_LIBRARY_PATH=/usr/local/cuda-12.5/lib64:${LD_LIBRARY_PATH:-}
 export PATH=/usr/local/cuda-12.5/bin:${PATH}
 
-export CUDA_VISIBLE_DEVICES=1
+# Both RTX 3090s visible; physical indices match the ids passed to ONNX Runtime.
+# Override with FACECAT_GPUS (e.g. "0,1") or --gpus on the CLI if needed.
+export CUDA_VISIBLE_DEVICES=0,1

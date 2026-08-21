@@ -54,7 +54,7 @@ on faces using hnsw (embedding vector_cosine_ops);
 create table if not exists face_groups (
     id bigserial primary key,
     label text,
-    rep_face_id bigint references faces(id),
+    rep_face_id bigint references faces(id) on delete set null,
     member_count int not null default 0,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
@@ -79,3 +79,15 @@ create table if not exists jobs (
     stats jsonb not null default '{}'::jsonb,
     error text
 );
+
+-- kNN edges computed during group rebuild (persisted per block so an
+-- interrupted rebuild can resume). Cleared when a new job starts.
+create table if not exists face_group_edges (
+    job_id bigint references jobs(id) on delete cascade,
+    face_id bigint not null references faces(id) on delete cascade,
+    nbr_face_id bigint not null references faces(id) on delete cascade,
+    similarity float8 not null,
+    primary key (face_id, nbr_face_id)
+);
+
+create index if not exists idx_group_edges_nbr on face_group_edges (nbr_face_id);

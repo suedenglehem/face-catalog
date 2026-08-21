@@ -7,13 +7,16 @@ from . import config
 
 
 class FaceEngine:
-    def __init__(self) -> None:
+    def __init__(self, ctx_id: int | None = None) -> None:
+        self.ctx_id = config.GPU_DEVICE_ID if ctx_id is None else int(ctx_id)
         self.app = FaceAnalysis(
             name=config.MODEL_NAME,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            # ORT requires one options dict per provider (same length as `providers`)
+            provider_options=[{"device_id": self.ctx_id}, {}],
         )
         self.app.prepare(
-            ctx_id=config.GPU_DEVICE_ID,
+            ctx_id=self.ctx_id,
             det_size=(config.DET_SIZE, config.DET_SIZE),
         )
 

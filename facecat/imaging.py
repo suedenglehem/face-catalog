@@ -30,9 +30,9 @@ def load_rgb(path: Path) -> np.ndarray:
 
     if suffix in RAW_EXTS:
         with rawpy.imread(str(path)) as raw:
+            # Note: rawpy >= 0.20 removed the `auto_bright` kwarg (default off).
             rgb = raw.postprocess(
                 use_camera_wb=True,
-                auto_bright=False,
                 output_bps=8,
             )
         return rgb
