@@ -477,6 +477,14 @@ def main() -> None:
     p_root.add_argument("path")
     _add_pipeline_args(p_root)
 
+    p_reset = sub.add_parser(
+        "reset",
+        help="Clear all catalog data (files, faces, groups, jobs). Roots are kept by default.",
+    )
+    p_reset.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p_reset.add_argument("--keep-thumbs", action="store_true", help="do not delete thumbnail files on disk")
+    p_reset.add_argument("--clear-roots", action="store_true", help="also remove registered roots")
+
     args = parser.parse_args()
 
     if args.cmd == "init":
@@ -510,6 +518,18 @@ def main() -> None:
 
         stats = run_pipeline(roots, gpus, threads_per_gpu, cpu_workers, bool(args.fresh))
         print(f"finished: {stats.snapshot()}")
+    elif args.cmd == "reset":
+        if not args.yes:
+            answer = input("Clear all catalog data? [y/N] ").strip().lower()
+            if answer not in {"y", "yes"}:
+                print("aborted")
+                return
+        summary = db.reset_database(keep_thumbs=args.keep_thumbs, clear_roots=args.clear_roots)
+        print(f"reset done: cleared={summary['cleared']} thumbs_removed={summary['thumbs_removed']}")
+        if args.clear_roots:
+            print("roots removed - re-add them with add-root before index-all")
+        else:
+            print("roots kept - run 'index-all' to rebuild the catalog")
 
 
 if __name__ == "__main__":

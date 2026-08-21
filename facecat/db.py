@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 import psycopg
@@ -192,6 +193,48 @@ def list_roots() -> list[dict]:
             )
             rows = cur.fetchall()
     return rows
+
+
+def reset_database(keep_thumbs: bool = False, clear_roots: bool = False) -> dict:
+    """Clear catalog data for a fresh start.
+
+    By default roots are kept so you can immediately re-run index-all; pass
+    clear_roots to remove them too. Thumbnails on disk are removed unless
+    keep_thumbs is set (they would otherwise be orphaned). Returns a summary
+    of row counts cleared and thumbnails deleted.
+    """
+    tables_to_truncate = [
+        "face_group_members",
+        "face_groups",
+        "face_group_edges",
+        "faces",
+        "files",
+        "jobs",
+    ]
+    if clear_roots:
+        tables_to_truncate.append("roots")
+
+    counts: dict[str, int] = {}
+    with connect() as conn:
+        with conn.cursor() as cur:
+            for table in ("files", "faces", "face_groups", "jobs", "roots"):
+                cur.execute(f"select count(*) as n from {table}")
+                counts[table] = int(cur.fetchone()["n"])
+            # Every FK target is either in this list or `roots` (kept unless
+            # clear_roots), so no CASCADE is needed. restart identity gives
+            # fresh 1-based ids after the reset.
+            cur.execute("truncate " + ", ".join(tables_to_truncate) + " restart identity")
+        conn.commit()
+
+    thumbs_removed = 0
+    if not keep_thumbs:
+        for sub in ("files", "faces"):
+            d = config.THUMBS_DIR / sub
+            if d.is_dir():
+                thumbs_removed += sum(1 for p in d.rglob("*") if p.is_file())
+                shutil.rmtree(d)
+
+    return {"cleared": counts, "thumbs_removed": thumbs_removed}
 
 
 def main() -> None:
