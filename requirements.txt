@@ -7,6 +7,8 @@ numpy
 pillow
 rawpy
 python-dotenv
-insightface
-onnxruntime-gpu
+# Pinned to the version verified on the host (1.0.x changed packaging/deps).
+insightface==0.7.3
+# Pinned: 1.22.x targets CUDA 12.x + cuDNN 9 (matches the Docker base image).
+onnxruntime-gpu==1.22.0
 opencv-python-headless

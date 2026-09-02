@@ -8,7 +8,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rawpy
-from PIL import Image, ImageOps
+from PIL import ExifTags, Image, ImageOps
+from PIL.TiffImagePlugin import IFDRational
 
 from . import config
 
@@ -42,6 +43,24 @@ def load_rgb(path: Path) -> np.ndarray:
         return np.asarray(im)
 
 
+def _json_safe(value):
+    """Coerce a PIL EXIF value to a JSON-serializable type.
+
+    PIL returns IFDRational for ratios (FNumber, ExposureTime, ...) which
+    would otherwise crash json.dumps() in the indexing pipeline.
+    """
+    if isinstance(value, IFDRational):
+        try:
+            return float(value)
+        except ZeroDivisionError:
+            return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace").strip("\x00")
+    if value is None or isinstance(value, (int, float, str)):
+        return value
+    return str(value)
+
+
 def extract_exif(path: Path) -> dict:
     if shutil.which("exiftool"):
         cp = subprocess.run(
@@ -72,10 +91,19 @@ def extract_exif(path: Path) -> dict:
         }
         return keep
 
+    # Fallback without exiftool: named tags from the base IFD and the Exif
+    # sub-IFD (where DateTimeOriginal/CreateDate live), values coerced to
+    # JSON-safe types. Best effort - no GPS/lens details like exiftool gives.
     try:
         with Image.open(path) as im:
-            raw = im.getexif()
-            return {str(k): raw.get(k) for k in raw.keys()}
+            exif = im.getexif()
+            out = {}
+            for ifd in (exif, exif.get_ifd(ExifTags.IFD.EXIF)):
+                for tag, value in ifd.items():
+                    name = ExifTags.TAGS.get(tag, str(tag))
+                    if name not in out:
+                        out[name] = _json_safe(value)
+            return out
     except Exception:
         return {}
 

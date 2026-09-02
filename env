@@ -21,9 +21,12 @@ INDEX_GPU_QUEUE=8
 GROUP_BLOCK_SIZE=512
 KNN_CHUNK=0
 
-export LD_LIBRARY_PATH=/usr/local/cuda-12.5/lib64:${LD_LIBRARY_PATH:-}
-export PATH=/usr/local/cuda-12.5/bin:${PATH}
+# cuDNN 9 ships in the venv as a wheel (nvidia-cudnn-cu12); CUDA 12 runtime is
+# system-wide. Both are needed by onnxruntime-gpu at import time, otherwise it
+# silently falls back to CPU.
+export LD_LIBRARY_PATH=$PWD/.v312/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-12/lib64:${LD_LIBRARY_PATH:-}
 
-# Both RTX 3090s visible; physical indices match the ids passed to ONNX Runtime.
-# Override with FACECAT_GPUS (e.g. "0,1") or --gpus on the CLI if needed.
+# This box has 3 GPUs (0: RTX 3090, 1: RTX 3080 Ti, 2: RTX 3090); 0 and 2 are
+# usually busy with other work. Physical indices match the ids passed to ONNX
+# Runtime. Override with FACECAT_GPUS (e.g. "0,1") or --gpus on the CLI.
 export CUDA_VISIBLE_DEVICES=0,1

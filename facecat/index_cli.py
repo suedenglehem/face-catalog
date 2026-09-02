@@ -517,7 +517,14 @@ def main() -> None:
             roots = [dict(row)]
 
         stats = run_pipeline(roots, gpus, threads_per_gpu, cpu_workers, bool(args.fresh))
-        print(f"finished: {stats.snapshot()}")
+        snap = stats.snapshot()
+        print(f"finished: {snap}")
+        if snap["errors"]:
+            print(f"warning: {snap['errors']} file(s) failed (see log above)")
+        # Exit non-zero when nothing succeeded so callers/CI notice a fully
+        # broken run (e.g. missing exiftool crashing every file).
+        if snap["errors"] and not snap["files_reindexed"]:
+            raise SystemExit(1)
     elif args.cmd == "reset":
         if not args.yes:
             answer = input("Clear all catalog data? [y/N] ").strip().lower()

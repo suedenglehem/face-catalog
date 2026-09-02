@@ -60,6 +60,53 @@ where it left off until every file/face has been processed. Use `--fresh` (index
    make web         # http://localhost:8000
    ```
 
+The steps above run directly on the host using `. ./setenv.sh`. To instead run the whole
+stack in containers (recommended for GPU indexing), see [Docker](#docker-gpu).
+
+## Docker (GPU)
+
+Runs Postgres, the web app, and the index/group jobs as containers with GPU access.
+
+**Prerequisites on the host:** an NVIDIA driver plus the **NVIDIA Container Toolkit**, so
+that `driver: nvidia` device reservations resolve inside containers. Verify with:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.9.2-base-ubuntu24.04 nvidia-smi
+```
+
+**Build and start:**
+
+```bash
+make docker-build        # build the CUDA + onnxruntime-gpu image
+make docker-up           # start db + webapp (http://localhost:8000)
+```
+
+**Run jobs** (crash-resumable — re-run after an interruption to continue):
+
+```bash
+make docker-index        # index all roots on the GPUs
+make docker-group        # rebuild face groups on the GPUs
+```
+
+Or directly with compose, overriding flags as needed:
+
+```bash
+docker compose run --rm index python -m facecat.index_cli index-all --threads-per-gpu 4 --gpus "0,1"
+docker compose run --rm group python -m facecat.group_cli rebuild --threads-per-gpu 4
+```
+
+**Notes:**
+
+- The photo tree is mounted read-only at `/photos` (see `./photos:/photos:ro` in
+  `docker-compose.yml`). Point that bind mount at your real photos directory, and register
+  the *container* path as a root: `python -m facecat.index_cli add-root /photos`.
+- Container environment comes from `.docker.env` (not the host `env` file). It sets
+  `DATABASE_URL=...@db:5432/facecat`, `THUMBS_DIR=/data/thumbs`, and GPU defaults.
+- Thumbnails (`facecat_thumbs`) and the InsightFace model cache (`facecat_models`) are named
+  volumes, so models download once and thumbnails survive container restarts.
+- All three app services reserve every visible GPU; set `CUDA_VISIBLE_DEVICES` in
+  `.docker.env` (or pass `--gpus`) to restrict which physical GPUs are used.
+
 ## CLI reference
 
 ### `python -m facecat.index_cli`
@@ -109,3 +156,10 @@ Loaded via `. ./setenv.sh`. Key settings:
 - `/groups` — similar-face clusters with representative thumbnails
 - `/admin` — system info, counts, DB size, last indexation/reindexation, job history
 - `/invalidate/<face_id>` / `/restore/<face_id>` — human match invalidation
+
+## Reset
+
+python -m facecat.index_cli reset            # interactive confirmation (y/N)
+python -m facecat.index_cli reset --yes      # non-interactive
+python -m facecat.index_cli reset --keep-thumbs   # keep thumbnail files on disk
+python -m facecat.index_cli reset --clear-roots   # also remove registered roots

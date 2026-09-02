@@ -31,6 +31,9 @@ class FaceEngine:
                 {
                     "bbox": bbox,
                     "det_score": float(face.det_score),
+                    # No separate quality model is loaded; det_score doubles as
+                    # the quality proxy (group_cli picks group representatives
+                    # by max quality_score).
                     "quality_score": float(face.det_score),
                     "embedding": np.asarray(face.normed_embedding, dtype=np.float32),
                 }

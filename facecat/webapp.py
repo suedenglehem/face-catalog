@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 
-from . import config, db
+from . import config, db, imaging
 from .vision import FaceEngine
 
 
@@ -563,10 +563,16 @@ def home():
 
 
 @app.post("/search", response_class=HTMLResponse)
-async def search(file: UploadFile = File(...)):
-    data = await file.read()
+def search(file: UploadFile = File(...)):
+    # Sync endpoint so FastAPI runs it in the thread pool; ONNX inference is
+    # blocking and must not stall the event loop.
+    data = file.file.read()
     rgb = query_image_to_rgb(data)
-    embedding = ENGINE.embedding_from_best_face(rgb)
+    # Detect at the same scale as indexing (MAX_DETECT_SIDE); full-res
+    # detection on large photos yields embeddings that are not comparable to
+    # the stored ones (self-match drops from ~1.0 to ~0.75).
+    resized, _scale = imaging.resize_for_detector(rgb, config.MAX_DETECT_SIDE)
+    embedding = ENGINE.embedding_from_best_face(resized)
     rows = search_db(embedding, config.SEARCH_LIMIT)
     body = home_body() + "<hr>" + render_search_results(rows)
     return page("Face search results", body)
@@ -600,7 +606,10 @@ def toggle_face(face_id: int, next: str = Form(...)):
     if row is None:
         return RedirectResponse(url="/", status_code=303)
     print(f"[web] face {face_id} -> invalidated={bool(row['invalidated'])}")
-    return RedirectResponse(url=next or "/", status_code=303)
+    # Only trust root-relative redirects; anything else (an absolute URL or a
+    # protocol-relative one like "//host") would be an open redirect.
+    safe_next = next if next.startswith("/") and not next[:2] in ("//", "/\\") else "/"
+    return RedirectResponse(url=safe_next, status_code=303)
 
 
 @app.get("/admin", response_class=HTMLResponse)

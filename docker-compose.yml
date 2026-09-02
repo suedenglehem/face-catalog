@@ -1,3 +1,12 @@
+# Face catalog stack: Postgres (pgvector) + GPU web app + on-demand jobs.
+#
+#   docker compose up -d db webapp          # run the database and web UI
+#   docker compose run --rm index           # index all roots (crash-resumable)
+#   docker compose run --rm group           # rebuild face groups (crash-resumable)
+#
+# GPU services need the NVIDIA Container Toolkit on the host so that
+# `driver: nvidia` device reservations resolve. See README "Docker" section.
+
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -17,5 +26,73 @@ services:
       retries: 20
     restart: unless-stopped
 
+  webapp:
+    build: .
+    container_name: facecat-web
+    env_file: .docker.env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      # Photo tree to index/search (read-only). Adjust the host path as needed.
+      - ./photos:/photos:ro
+      # Thumbnails + insightface model cache persist across container restarts.
+      - facecat_thumbs:/data/thumbs
+      - facecat_models:/home/app/.insightface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # One-off indexing job (crash-resumable: re-run to continue).
+  index:
+    build: .
+    env_file: .docker.env
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "facecat.index_cli", "index-all", "--threads-per-gpu", "4"]
+    volumes:
+      - ./photos:/photos:ro
+      - facecat_thumbs:/data/thumbs
+      - facecat_models:/home/app/.insightface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: "no"
+
+  # One-off group rebuild job (crash-resumable: re-run to continue).
+  group:
+    build: .
+    env_file: .docker.env
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "facecat.group_cli", "rebuild", "--threads-per-gpu", "4"]
+    volumes:
+      - ./photos:/photos:ro
+      - facecat_thumbs:/data/thumbs
+      - facecat_models:/home/app/.insightface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: "no"
+
 volumes:
   facecat_dbdata:
+  facecat_thumbs:
+  facecat_models:

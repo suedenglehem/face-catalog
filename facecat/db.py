@@ -33,27 +33,16 @@ def connect():
     return conn
 
 
-def _split_sql_statements(sql_text: str) -> list[str]:
-    # Strip line comments so semicolons inside comments do not split statements.
-    lines = []
-    for line in sql_text.splitlines():
-        idx = line.find("--")
-        if idx >= 0:
-            line = line[:idx]
-        lines.append(line)
-    return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
-
-
 def run_schema_file() -> None:
     schema_path = Path(__file__).with_name("schema.sql")
     sql_text = schema_path.read_text(encoding="utf-8")
 
-    statements = _split_sql_statements(sql_text)
-
+    # A single parameterless execute() uses the simple query protocol, so
+    # Postgres itself parses comments, quoted strings and all statements -
+    # no fragile client-side splitting (and no psycopg version dependency).
     with connect() as conn:
         with conn.cursor() as cur:
-            for stmt in statements:
-                cur.execute(stmt)
+            cur.execute(sql_text)
         conn.commit()
 
 
