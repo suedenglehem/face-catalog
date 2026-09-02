@@ -11,9 +11,12 @@ down:
 logs:
 	docker compose logs -f db
 
+# Extra index CLI args, e.g.: make docker-index INDEX_ARGS="--batch-size 1000"
+INDEX_ARGS ?=
+
 # Index all registered roots (crash-resumable: re-run to continue).
 index:
-	. ./setenv.sh && python -m facecat.index_cli index-all --threads-per-gpu 4
+	. ./setenv.sh && python -m facecat.index_cli index-all --threads-per-gpu 4 $(INDEX_ARGS)
 
 # Rebuild face groups on the GPUs (crash-resumable: re-run to continue).
 groups:
@@ -37,7 +40,7 @@ docker-logs:
 
 # Crash-resumable jobs; re-run after an interruption to continue.
 docker-index:
-	docker compose run --rm index
+	docker compose run --rm index $(INDEX_ARGS)
 
 docker-group:
 	docker compose run --rm group

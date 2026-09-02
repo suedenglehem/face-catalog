@@ -35,6 +35,7 @@ class Stats:
     files_seen: int = 0
     files_skipped: int = 0
     files_reindexed: int = 0
+    files_deferred: int = 0
     faces_found: int = 0
     errors: int = 0
     roots_done: int = 0
@@ -50,10 +51,36 @@ class Stats:
                 "files_seen": self.files_seen,
                 "files_skipped_unchanged": self.files_skipped,
                 "files_reindexed": self.files_reindexed,
+                "files_deferred_batch_limit": self.files_deferred,
                 "faces_found": self.faces_found,
                 "errors": self.errors,
                 "roots_done": self.roots_done,
             }
+
+
+class _BatchBudget:
+    """Caps how many files this run enqueues for indexing.
+
+    The scan still walks every file (so last_seen_at touches and missing-file
+    deletion stay correct); only the enqueue is limited. Deferred files are
+    new/changed ones that simply wait for the next run, which skips already
+    indexed files by size+mtime - so re-running continues where this stopped.
+    """
+
+    def __init__(self, limit: int | None) -> None:
+        self.limit = limit
+        self.remaining = limit
+
+    @property
+    def exhausted(self) -> bool:
+        return self.limit is not None and self.remaining <= 0
+
+    def take(self) -> bool:
+        if self.exhausted:
+            return False
+        if self.limit is not None:
+            self.remaining -= 1
+        return True
 
 
 def _connect() -> psycopg.Connection:
@@ -78,12 +105,15 @@ def _scan_root(
     fresh: bool,
     stats: Stats,
     decode_q: queue.Queue,
+    budget: _BatchBudget,
 ) -> None:
     """Walk one root; enqueue changed/new files for decoding.
 
     Unchanged files (same size + mtime in DB) are only touched so that an
     interrupted re-run skips them almost instantly - this is what makes job
-    continuation cheap.
+    continuation cheap. With a batch budget, the walk still covers every file
+    but enqueues only while the shared (cross-root) budget has room; the rest
+    count as deferred and are picked up by the next run.
     """
     seen_paths: list[str] = []
     flushed = 0
@@ -130,18 +160,24 @@ def _scan_root(
             flush_seen()
 
         if fresh:
-            decode_q.put(FileTask(root_id, rel, path, st.st_size, st.st_mtime))
+            if budget.take():
+                decode_q.put(FileTask(root_id, rel, path, st.st_size, st.st_mtime))
+            else:
+                stats.inc("files_deferred")
             continue
 
         row = existing.get(str(path))
-        if (
+        unchanged = (
             row is not None
             and row[0] == st.st_size
             and abs(row[1] - st.st_mtime) < 1e-3
-        ):
+        )
+        if unchanged:
             stats.inc("files_skipped")
-        else:
+        elif budget.take():
             decode_q.put(FileTask(root_id, rel, path, st.st_size, st.st_mtime))
+        else:
+            stats.inc("files_deferred")
 
     # Touch last_seen_at for everything present on disk. The returned list is
     # the authoritative "seen this scan" set used to delete only files truly
@@ -357,6 +393,7 @@ def run_pipeline(
     threads_per_gpu: int,
     cpu_workers: int,
     fresh: bool,
+    batch_size: int | None = None,
 ) -> Stats:
     stats = Stats()
     job_id = db.start_job("index_all")
@@ -365,15 +402,17 @@ def run_pipeline(
     gpu_q: queue.Queue = queue.Queue(maxsize=config.INDEX_GPU_QUEUE)
 
     n_gpu_workers = len(gpus) * threads_per_gpu
+    budget = _BatchBudget(batch_size)
 
     # Warm the model cache once in the main thread so worker threads do not
     # race on first-time model download, then release its GPU memory.
     print(f"[init] warming face engine on GPU {gpus[0]} ...")
     _warm = FaceEngine(ctx_id=gpus[0])
     del _warm
+    batch_note = f" batch_size={batch_size}" if batch_size is not None else ""
     print(
         f"[init] gpus={gpus} threads_per_gpu={threads_per_gpu} "
-        f"gpu_workers={n_gpu_workers} cpu_decode_workers={cpu_workers}"
+        f"gpu_workers={n_gpu_workers} cpu_decode_workers={cpu_workers}{batch_note}"
     )
 
     stop_evt = threading.Event()
@@ -401,7 +440,7 @@ def run_pipeline(
 
             # Scan inline (workers already running) so we capture the seen set;
             # bounded decode_q provides back-pressure if workers fall behind.
-            seen_paths = _scan_root(root_id, root_path, fresh, stats, decode_q)
+            seen_paths = _scan_root(root_id, root_path, fresh, stats, decode_q, budget)
 
             # All tasks for this root are in the pipeline; wait until both
             # stages have fully drained before finalizing the root.
@@ -456,6 +495,11 @@ def _add_pipeline_args(p: argparse.ArgumentParser) -> None:
         help=f"CPU decode threads for RAW/EXIF/thumbnails (default {config.INDEX_CPU_WORKERS})",
     )
     p.add_argument("--fresh", action="store_true", help="re-detect all files even if unchanged")
+    p.add_argument(
+        "--batch-size", type=int, default=None, metavar="N",
+        help="index at most N new/changed files this run; re-run to continue with the rest "
+             "(default: no limit)",
+    )
 
 
 def main() -> None:
@@ -516,11 +560,19 @@ def main() -> None:
                     row = cur.fetchone()
             roots = [dict(row)]
 
-        stats = run_pipeline(roots, gpus, threads_per_gpu, cpu_workers, bool(args.fresh))
+        batch_size = args.batch_size
+        if batch_size is not None and batch_size < 1:
+            parser.error("--batch-size must be >= 1")
+        stats = run_pipeline(roots, gpus, threads_per_gpu, cpu_workers, bool(args.fresh), batch_size)
         snap = stats.snapshot()
         print(f"finished: {snap}")
         if snap["errors"]:
             print(f"warning: {snap['errors']} file(s) failed (see log above)")
+        if snap["files_deferred_batch_limit"]:
+            print(
+                f"batch limit reached: {snap['files_deferred_batch_limit']} file(s) "
+                "left for the next run - re-run the same command to continue"
+            )
         # Exit non-zero when nothing succeeded so callers/CI notice a fully
         # broken run (e.g. missing exiftool crashing every file).
         if snap["errors"] and not snap["files_reindexed"]:

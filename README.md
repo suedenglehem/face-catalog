@@ -122,6 +122,11 @@ Flags for `index-all`:
 - `--threads-per-gpu N` — worker threads per GPU (default: `$THREADS_PER_GPU` or 4)
 - `--gpus "0,1"` — physical GPU ids to use (default: all visible via CUDA_VISIBLE_DEVICES)
 - `--cpu-workers N` — CPU decode/RAW-conversion pool size (default: `$INDEX_CPU_WORKERS`)
+- `--batch-size N` — index at most N new/changed files this run; re-run the same command to
+  continue with the next batch (e.g. `--batch-size 1000`). Already-indexed files are skipped
+  by size+mtime, so each run picks up exactly where the previous one stopped. Works for all
+  launch modes: `make docker-index INDEX_ARGS="--batch-size 1000"`, or append the flag to the
+  direct / compose commands above.
 - `--fresh` — wipe previous progress and start from scratch
 
 ### `python -m facecat.group_cli`
