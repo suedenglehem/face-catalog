@@ -29,17 +29,19 @@ where it left off until every file/face has been processed. Use `--fresh` (index
 
 ## Quick start
 
-1. Put your photos in a directory tree and register its root:
+1. Start the database:
 
    ```bash
    . ./setenv.sh
-   python -m facecat.index_cli add-root /path/to/photos
+   make up          # docker compose, pgvector/pg16 on :5432
    ```
 
-2. Start the database:
+2. Put your photos in a directory tree and register its root (the schema is
+   created automatically on first use; `python -m facecat.index_cli init` does
+   it explicitly):
 
    ```bash
-   make up          # docker compose, pgvector/pg16 on :5432
+   python -m facecat.index_cli add-root /path/to/photos
    ```
 
 3. Index everything (resumable):
@@ -113,6 +115,7 @@ docker compose run --rm group python -m facecat.group_cli rebuild --threads-per-
 
 | Command | Description |
 | --- | --- |
+| `init` | Create the database schema (idempotent; also done automatically on first connect) |
 | `add-root PATH` | Register a directory tree to index (recursive) |
 | `list-roots` | Show registered roots and their status |
 | `index-all` | Index all roots; resumes an interrupted run automatically |

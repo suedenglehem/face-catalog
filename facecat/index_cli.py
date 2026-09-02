@@ -86,6 +86,7 @@ class _BatchBudget:
 def _connect() -> psycopg.Connection:
     conn = psycopg.connect(config.DATABASE_URL, row_factory=dict_row)
     db.ensure_vector(conn)
+    db.ensure_schema(conn)
     register_vector(conn)
     return conn
 

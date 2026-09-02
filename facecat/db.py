@@ -26,23 +26,45 @@ def ensure_vector(conn) -> None:
     conn.commit()
 
 
+def _schema_sql() -> str:
+    return Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+
+
+def ensure_schema(conn) -> None:
+    """Create the schema on this database if it is missing.
+
+    Makes every connection self-healing, like ensure_vector(): a freshly
+    created (or reset with down -v) database needs no manual init step
+    before add-root / index-all. The check is one to_regclass() lookup;
+    the full file only runs when the marker table is absent. schema.sql is
+    fully idempotent (if not exists everywhere), so a first-run race between
+    processes is harmless.
+    """
+    with conn.cursor() as cur:
+        cur.execute("select to_regclass('public.roots') is not null as has_schema")
+        if cur.fetchone()["has_schema"]:
+            return
+        # A single parameterless execute() uses the simple query protocol, so
+        # Postgres itself parses comments, quoted strings and all statements -
+        # no fragile client-side splitting (and no psycopg version dependency).
+        cur.execute(_schema_sql())
+    conn.commit()
+
+
 def connect():
     conn = psycopg.connect(config.DATABASE_URL, row_factory=dict_row)
     ensure_vector(conn)
+    ensure_schema(conn)
     register_vector(conn)
     return conn
 
 
 def run_schema_file() -> None:
-    schema_path = Path(__file__).with_name("schema.sql")
-    sql_text = schema_path.read_text(encoding="utf-8")
-
-    # A single parameterless execute() uses the simple query protocol, so
-    # Postgres itself parses comments, quoted strings and all statements -
-    # no fragile client-side splitting (and no psycopg version dependency).
+    # connect() already self-heals; re-run the file explicitly so `init` also
+    # applies schema changes to an existing database.
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql_text)
+            cur.execute(_schema_sql())
         conn.commit()
 
 
