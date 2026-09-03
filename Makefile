@@ -14,16 +14,21 @@ logs:
 # Extra index CLI args, e.g.: make docker-index INDEX_ARGS="--batch-size 1000"
 INDEX_ARGS ?=
 
+# Pin physical GPUs for direct runs, e.g.: make index GPUS=0,1. Forwarded as an
+# environment prefix because dash (make's shell) can't pass arguments to `.`.
+GPUS ?=
+GPU_ENV = $(if $(GPUS),CUDA_VISIBLE_DEVICES=$(GPUS) ,)
+
 # Index all registered roots (crash-resumable: re-run to continue).
 index:
-	. ./setenv.sh && python -m facecat.index_cli index-all --threads-per-gpu 4 $(INDEX_ARGS)
+	$(GPU_ENV). ./setenv.sh && python -m facecat.index_cli index-all --threads-per-gpu 4 $(INDEX_ARGS)
 
 # Rebuild face groups on the GPUs (crash-resumable: re-run to continue).
 groups:
-	. ./setenv.sh && python -m facecat.group_cli rebuild --threads-per-gpu 4
+	$(GPU_ENV). ./setenv.sh && python -m facecat.group_cli rebuild --threads-per-gpu 4
 
 web:
-	. ./setenv.sh && uvicorn facecat.webapp:app --host 0.0.0.0 --port 8000
+	$(GPU_ENV). ./setenv.sh && uvicorn facecat.webapp:app --host 0.0.0.0 --port 8000
 
 # --- Docker (GPU) ------------------------------------------------------------
 docker-build:

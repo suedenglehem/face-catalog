@@ -5,9 +5,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-load_dotenv()
+# Environment variables come from the shell (source setenv.sh); no .env file is
+# loaded here anymore.
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -34,21 +33,88 @@ GROUP_THRESHOLD = float(os.getenv("GROUP_THRESHOLD", "0.55"))
 SEARCH_LIMIT = int(os.getenv("SEARCH_LIMIT", "50"))
 
 
-def _detect_gpus() -> list[int]:
-    """Detect available GPU indices.
+def _cvd_map() -> dict[int, int] | None:
+    """Map physical GPU index -> visible (CUDA/ORT) device id.
 
-    Priority: FACECAT_GPUS env var, then nvidia-smi, then [GPU_DEVICE_ID].
-    Indices are physical; keep CUDA_VISIBLE_DEVICES unset or "0,1" so they
-    match the device ids passed to ONNX Runtime.
+    Returns None when CUDA_VISIBLE_DEVICES is unset, in which case physical
+    and visible ids coincide. Non-numeric entries (GPU UUIDs) count toward the
+    visible total but cannot be mapped by index.
     """
+    raw = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
+    if not raw:
+        return None
+    mapping: dict[int, int] = {}
+    for visible_id, entry in enumerate(e.strip() for e in raw.split(",") if e.strip()):
+        try:
+            mapping[int(entry)] = visible_id
+        except ValueError:
+            pass  # UUID form
+    return mapping
+
+
+def translate_gpus(physical_ids: list[int]) -> list[int]:
+    """Translate physical GPU ids to ONNX Runtime device ids.
+
+    ORT's `device_id` is a *visible* id (position within CUDA_VISIBLE_DEVICES)
+    while nvidia-smi and user-facing flags speak physical indices; with CVD
+    unset the two coincide. Hidden ids are skipped with a warning.
+    """
+    m = _cvd_map()
+    if m is None:
+        return list(dict.fromkeys(physical_ids))
+    out: list[int] = []
+    hidden: list[int] = []
+    for p in physical_ids:
+        if p in m:
+            out.append(m[p])
+        else:
+            hidden.append(p)
+    if hidden:
+        print(
+            f"[gpus] warning: physical GPU(s) {hidden} not visible "
+            f"(CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']!r}); skipping"
+        )
+    return sorted(set(out))
+
+
+def _detect_gpus() -> list[int]:
+    """Detect ONNX Runtime device ids to use (visible space).
+
+    Priority: FACECAT_GPUS env var (physical indices, translated through
+    CUDA_VISIBLE_DEVICES), then every visible device. nvidia-smi is only
+    consulted when CVD is unset because it ignores CVD and always reports
+    physical indices.
+    """
+    m = _cvd_map()
+
+    def note(result: list[int]) -> list[int]:
+        if m is not None:
+            print(
+                f"[gpus] CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']!r}: "
+                f"using visible device ids {result}"
+            )
+        return result
+
     env = os.getenv("FACECAT_GPUS")
     if env:
         try:
             idxs = [int(x) for x in env.split(",") if x.strip()]
-            if idxs:
-                return idxs
         except ValueError:
-            pass
+            idxs = []
+        if idxs:
+            translated = translate_gpus(idxs)
+            if not translated:
+                raise ValueError(
+                    f"FACECAT_GPUS={env!r}: every requested GPU is hidden by CUDA_VISIBLE_DEVICES"
+                )
+            return note(translated)
+
+    if m is not None:
+        # CVD set: visible ids are exactly 0..n-1 by construction, so no
+        # nvidia-smi round trip is needed (and its physical indices would lie).
+        n = len([e for e in os.environ["CUDA_VISIBLE_DEVICES"].split(",") if e.strip()])
+        return note(list(range(n)))
+
     exe = shutil.which("nvidia-smi")
     if exe:
         try:

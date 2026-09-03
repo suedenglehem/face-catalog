@@ -32,7 +32,7 @@ where it left off until every file/face has been processed. Use `--fresh` (index
 1. Start the database:
 
    ```bash
-   . ./setenv.sh
+   . ./setenv.sh            # or `. ./setenv.sh 0,1` to pin CUDA_VISIBLE_DEVICES
    make up          # docker compose, pgvector/pg16 on :5432
    ```
 
@@ -102,7 +102,7 @@ docker compose run --rm group python -m facecat.group_cli rebuild --threads-per-
 - The photo tree is mounted read-only at `/photos` (see `./photos:/photos:ro` in
   `docker-compose.yml`). Point that bind mount at your real photos directory, and register
   the *container* path as a root: `python -m facecat.index_cli add-root /photos`.
-- Container environment comes from `.docker.env` (not the host `env` file). It sets
+- Container environment comes from `.docker.env` (not the host `setenv.sh`). It sets
   `DATABASE_URL=...@db:5432/facecat`, `THUMBS_DIR=/data/thumbs`, and GPU defaults.
 - Thumbnails (`facecat_thumbs`) and the InsightFace model cache (`facecat_models`) are named
   volumes, so models download once and thumbnails survive container restarts.
@@ -123,7 +123,8 @@ docker compose run --rm group python -m facecat.group_cli rebuild --threads-per-
 Flags for `index-all`:
 
 - `--threads-per-gpu N` — worker threads per GPU (default: `$THREADS_PER_GPU` or 4)
-- `--gpus "0,1"` — physical GPU ids to use (default: all visible via CUDA_VISIBLE_DEVICES)
+- `--gpus "0,1"` — physical GPU ids to use; mapped to visible device ids when
+  CUDA_VISIBLE_DEVICES is set (default: all visible GPUs)
 - `--cpu-workers N` — CPU decode/RAW-conversion pool size (default: `$INDEX_CPU_WORKERS`)
 - `--batch-size N` — index at most N new/changed files this run; re-run the same command to
   continue with the next batch (e.g. `--batch-size 1000`). Already-indexed files are skipped
@@ -142,18 +143,22 @@ Flags for `index-all`:
 Flags for `rebuild`:
 
 - `--threads-per-gpu N` — worker threads per GPU (default: `$THREADS_PER_GPU` or 4)
-- `--gpus "0,1"` — physical GPU ids to use
+- `--gpus "0,1"` — physical GPU ids to use (mapped through CUDA_VISIBLE_DEVICES when set)
 - `--force` — drop existing edges/groups and start over
 - `--k N` / `--threshold F` — override `$GROUP_K` / `$GROUP_THRESHOLD`
 
-## Environment variables (`env`)
+## Environment variables (`setenv.sh`)
 
-Loaded via `. ./setenv.sh`. Key settings:
+All host configuration lives in `setenv.sh`; source it with `. ./setenv.sh`. The
+optional first argument sets `CUDA_VISIBLE_DEVICES` for the session (e.g.
+`. ./setenv.sh 0,1`); omit it to keep whatever is already set or leave every GPU
+visible. When `CUDA_VISIBLE_DEVICES` ends up set, the script prints which cards it
+will run on. Key settings:
 
 - `DATABASE_URL`, `THUMBS_DIR`
 - `MODEL_NAME=buffalo_l`, `DET_SIZE=640`, `MAX_DETECT_SIDE=1600`
 - `GROUP_K=20`, `GROUP_THRESHOLD=0.55`, `SEARCH_LIMIT=50`
-- `CUDA_VISIBLE_DEVICES=0,1` — which physical GPUs are visible
+- `CUDA_VISIBLE_DEVICES` — which physical GPUs are visible (via argument or env)
 - `THREADS_PER_GPU=4` — default thread count per GPU for both CLIs
 - `INDEX_CPU_WORKERS`, `INDEX_DECODE_QUEUE`, `INDEX_GPU_QUEUE` — index pipeline tuning
 - `GROUP_BLOCK_SIZE`, `KNN_CHUNK` — grouping memory tuning

@@ -385,7 +385,12 @@ def _parse_gpus(spec: str | None) -> list[int]:
     if not spec:
         return list(config.GPUS)
     idxs = [int(x) for x in spec.split(",") if x.strip()]
-    return idxs or list(config.GPUS)
+    if not idxs:
+        return list(config.GPUS)
+    translated = config.translate_gpus(idxs)
+    if not translated:
+        raise ValueError(f"--gpus {spec!r}: every requested GPU is hidden by CUDA_VISIBLE_DEVICES")
+    return translated
 
 
 def run_pipeline(
