@@ -173,6 +173,44 @@ def database_size_bytes() -> int:
             return int(cur.fetchone()["n"])
 
 
+def catalog_stats() -> dict:
+    """Aggregate counts and last-activity timestamps for the `stats` command.
+
+    "Last update" is derived from columns already maintained on every index -
+    files.indexed_at (set to now() each time a file is indexed) and
+    roots.last_indexed_at - so no separate bookkeeping column can drift out of
+    sync with what actually happened. Timestamps are aware datetimes or None.
+    """
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select
+                    count(*) filter (where is_deleted = false) as photos_present,
+                    count(*) filter (where is_deleted = true)  as photos_deleted,
+                    max(indexed_at)                            as last_file_indexed,
+                    max(last_seen_at)                          as last_scan
+                from files
+                """
+            )
+            f = cur.fetchone()
+            cur.execute("select count(*) as n from faces where invalidated = false")
+            faces_n = int(cur.fetchone()["n"])
+            cur.execute("select count(*) as n from face_groups")
+            groups_n = int(cur.fetchone()["n"])
+            cur.execute("select max(last_indexed_at) as t from roots")
+            last_root = cur.fetchone()["t"]
+    return {
+        "photos_present": int(f["photos_present"]),
+        "photos_deleted": int(f["photos_deleted"]),
+        "faces": faces_n,
+        "groups": groups_n,
+        "last_file_indexed": f["last_file_indexed"],
+        "last_scan": f["last_scan"],
+        "last_root_indexed": last_root,
+    }
+
+
 def add_root(path: str) -> int:
     p = str(Path(path).resolve())
     with connect() as conn:

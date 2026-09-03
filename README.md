@@ -119,6 +119,7 @@ docker compose run --rm group python -m facecat.group_cli rebuild --threads-per-
 | `add-root PATH` | Register a directory tree to index (recursive) |
 | `list-roots` | Show registered roots and their status |
 | `index-all` | Index all roots; resumes an interrupted run automatically |
+| `stats` | Dump catalog counts (photos, faces, groups) and last-update times, plus the 5 most recent jobs — useful to check whether an index run actually did anything |
 
 Flags for `index-all`:
 

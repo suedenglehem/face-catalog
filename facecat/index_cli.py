@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import threading
 from dataclasses import dataclass, field
@@ -100,6 +101,29 @@ def _mtime_to_tz(epoch: float) -> datetime:
 # Stage 1: scanner (fast DB pre-check before any decode)
 # ---------------------------------------------------------------------------
 
+def _walk_files(root_path: Path):
+    """Yield every file under root_path, following directory symlinks.
+
+    Photo archives are commonly assembled from symlinked mounts (e.g. a year
+    folder pointing at an external drive). os.walk(followlinks=True) descends
+    into those; a realpath set guards against symlink cycles so a loop can't
+    spin forever - os.walk has no cycle protection of its own, and it also
+    prevents double-processing when two paths reach the same physical dir.
+    """
+    visited: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(root_path, followlinks=True):
+        real_dir = os.path.realpath(dirpath)
+        if real_dir in visited:
+            # Reached this physical directory before (cycle or shared mount);
+            # prune so we neither loop nor index its contents twice.
+            dirnames[:] = []
+            continue
+        visited.add(real_dir)
+        dirnames.sort()
+        for name in sorted(filenames):
+            yield Path(dirpath) / name
+
+
 def _scan_root(
     root_id: int,
     root_path: Path,
@@ -148,7 +172,7 @@ def _scan_root(
                     epoch = mt.timestamp() if isinstance(mt, datetime) else float(mt)
                     existing[r["abs_path"]] = (int(r["file_size"]), epoch)
 
-    for path in sorted(root_path.rglob("*")):
+    for path in _walk_files(root_path):
         if not path.is_file() or not imaging.is_supported_image(path):
             continue
 
@@ -490,6 +514,41 @@ def run_pipeline(
 # CLI
 # ---------------------------------------------------------------------------
 
+def _fmt_ts(dt: datetime | None) -> str:
+    """Render an aware DB timestamp in local time, or 'never' when absent."""
+    if dt is None:
+        return "never"
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _print_stats() -> None:
+    s = db.catalog_stats()
+    print("catalog statistics")
+    print(f"  photos present : {s['photos_present']}")
+    print(f"  photos deleted : {s['photos_deleted']}")
+    print(f"  faces          : {s['faces']}")
+    print(f"  face groups    : {s['groups']}")
+    print("last activity")
+    print(f"  file indexed   : {_fmt_ts(s['last_file_indexed'])}")
+    print(f"  root indexed   : {_fmt_ts(s['last_root_indexed'])}")
+    print(f"  last scan      : {_fmt_ts(s['last_scan'])}")
+
+    jobs = db.get_latest_jobs(5)
+    if not jobs:
+        return
+    print("recent jobs")
+    for j in jobs:
+        st = j["stats"] or {}
+        detail = (
+            f"reindexed={st.get('files_reindexed', 0)} "
+            f"faces={st.get('faces_found', 0)} errors={st.get('errors', 0)}"
+        )
+        print(
+            f"  #{j['id']} {j['job_type']:<12} {j['status']:<8} "
+            f"{_fmt_ts(j['started_at'])} -> {_fmt_ts(j['finished_at'])}  {detail}"
+        )
+
+
 def _add_pipeline_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--threads-per-gpu", type=int, default=config.THREADS_PER_GPU,
@@ -516,6 +575,10 @@ def main() -> None:
     p_add = sub.add_parser("add-root")
     p_add.add_argument("path")
     sub.add_parser("list-roots")
+    sub.add_parser(
+        "stats",
+        help="Dump catalog counts and last-update times (photos, faces, groups, recent jobs).",
+    )
 
     p_all = sub.add_parser(
         "index-all",
@@ -548,6 +611,8 @@ def main() -> None:
             print(
                 f"id={row['id']} path={row['path']} last_indexed_at={row.get('last_indexed_at')}"
             )
+    elif args.cmd == "stats":
+        _print_stats()
     elif args.cmd in ("index-all", "index-root"):
         gpus = _parse_gpus(args.gpus)
         threads_per_gpu = max(1, int(args.threads_per_gpu))
