@@ -15,7 +15,10 @@ A searchable face catalog for local photo collections (JPEG + RAW).
 
 Indexing and grouping use **all visible NVIDIA GPUs** in parallel. Each GPU runs an
 independent ONNX Runtime CUDA session; `--threads-per-gpu` controls how many worker
-threads per GPU feed it (default 4).
+threads per GPU feed it (default 4). Indexing also supports `--threads-max N`: workers
+are then started one at a time across the cards (round-robin), re-checking free VRAM
+before each launch and stopping on any card that would drop below `$RESERVE_VRAM`
+(default 2 GB) — useful when other processes share the GPUs.
 
 ```
 index-all:   scan -> decode/RAW-convert (CPU pool) -> detect+embed (N x T threads, one per GPU) -> persist
@@ -123,7 +126,12 @@ docker compose run --rm group python -m facecat.group_cli rebuild --threads-per-
 
 Flags for `index-all`:
 
-- `--threads-per-gpu N` — worker threads per GPU (default: `$THREADS_PER_GPU` or 4)
+- `--threads-per-gpu N` — worker threads per GPU (default: `$THREADS_PER_GPU` or 4);
+  ignored when `--threads-max` is given
+- `--threads-max N` — start at most N GPU workers total, one at a time across the cards
+  (round-robin), re-checking free VRAM before each launch and stopping on any card below
+  `$RESERVE_VRAM`; mutually exclusive with `--threads-per-gpu`. Example:
+  `python -m facecat.index_cli index-all --threads-max 20`
 - `--gpus "0,1"` — physical GPU ids to use; mapped to visible device ids when
   CUDA_VISIBLE_DEVICES is set (default: all visible GPUs)
 - `--cpu-workers N` — CPU decode/RAW-conversion pool size (default: `$INDEX_CPU_WORKERS`)
@@ -161,6 +169,8 @@ will run on. Key settings:
 - `GROUP_K=20`, `GROUP_THRESHOLD=0.55`, `SEARCH_LIMIT=50`
 - `CUDA_VISIBLE_DEVICES` — which physical GPUs are visible (via argument or env)
 - `THREADS_PER_GPU=4` — default thread count per GPU for both CLIs
+- `RESERVE_VRAM=2` — VRAM in GB kept free per card when indexing with `--threads-max`
+  (a card below this headroom gets no more workers)
 - `INDEX_CPU_WORKERS`, `INDEX_DECODE_QUEUE`, `INDEX_GPU_QUEUE` — index pipeline tuning
 - `GROUP_BLOCK_SIZE`, `KNN_CHUNK` — grouping memory tuning
 

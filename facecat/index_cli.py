@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import queue
+import subprocess
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -332,11 +333,29 @@ def _process_file(
     stats.inc("faces_found", len(faces))
 
 
-def _gpu_worker(gpu_q: queue.Queue, gpu_id: int, worker_idx: int, stats: Stats) -> None:
+def _gpu_worker(
+    gpu_q: queue.Queue,
+    gpu_id: int,
+    worker_idx: int,
+    stats: Stats,
+    ready_evt: threading.Event | None = None,
+) -> None:
     # Engine is created inside the worker thread so its CUDA context and
-    # ONNX session are bound to this thread / device.
-    engine = FaceEngine(ctx_id=gpu_id)
-    conn = _connect()
+    # ONNX session are bound to this thread / device. In --threads-max mode
+    # the launcher waits on ready_evt before starting the next worker, so
+    # every VRAM check sees all previously started engines' memory already
+    # allocated; signal it even when init fails so one dead engine cannot
+    # stall the whole launch sequence.
+    try:
+        engine = FaceEngine(ctx_id=gpu_id)
+        conn = _connect()
+    except Exception as exc:
+        print(f"[gpu{gpu_id}/w{worker_idx}] init failed: {exc}")
+        if ready_evt is not None:
+            ready_evt.set()
+        return
+    if ready_evt is not None:
+        ready_evt.set()
 
     while True:
         item = gpu_q.get()
@@ -417,6 +436,119 @@ def _parse_gpus(spec: str | None) -> list[int]:
     return translated
 
 
+def _visible_to_physical(visible_id: int) -> int | None:
+    """Map an ORT visible device id to the physical index nvidia-smi reports.
+
+    Identity when CUDA_VISIBLE_DEVICES is unset; otherwise the entry at that
+    position in CVD. UUID-form entries cannot be mapped by index and yield
+    None, which callers treat as "VRAM unknown" (launch allowed).
+    """
+    raw = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
+    if not raw:
+        return visible_id
+    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    if visible_id >= len(entries):
+        return None
+    try:
+        return int(entries[visible_id])
+    except ValueError:
+        return None
+
+
+class _VramGuard:
+    """Gates GPU worker launches on the free VRAM of each card.
+
+    nvidia-smi speaks physical indices while ORT device ids are visible
+    (position within CUDA_VISIBLE_DEVICES), so each requested id is resolved
+    to a physical index once up front. Free memory is re-queried before every
+    launch decision and never cached: the launcher waits for each worker's
+    engine to be ready first, then asks "is there still room on this card?".
+    """
+
+    def __init__(self, gpus: list[int], reserve_mib: int) -> None:
+        self.reserve_mib = reserve_mib
+        self._physical = {g: _visible_to_physical(g) for g in gpus}
+
+    def free_mib(self, gpu_id: int) -> int | None:
+        """Current free VRAM (MiB) on a card; None when it cannot be read."""
+        phys = self._physical.get(gpu_id)
+        if phys is None:
+            return None
+        try:
+            out = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,memory.free",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout
+        except Exception as exc:
+            print(f"[vram] nvidia-smi unavailable ({exc}); assuming GPU {gpu_id} has room")
+            return None
+        for line in out.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) == phys:
+                try:
+                    return int(parts[1])
+                except ValueError:
+                    return None
+        return None
+
+
+def _launch_gpu_workers_vram(
+    gpu_q: queue.Queue,
+    gpus: list[int],
+    threads_max: int,
+    stats: Stats,
+) -> list[threading.Thread]:
+    """Start up to `threads_max` GPU workers one at a time, VRAM-gated.
+
+    Cards are visited round-robin; before each launch the card's free VRAM is
+    re-read and if it has dropped below RESERVE_VRAM no more workers go there.
+    Each worker's engine init is awaited (ready_evt) before the next decision,
+    so every check sees all previously started engines' memory already
+    allocated. Note the last worker on a card may still push free VRAM below
+    the reserve -- the guard only gates *further* launches.
+    """
+    guard = _VramGuard(gpus, int(config.RESERVE_VRAM_GB * 1024))
+    threads: list[threading.Thread] = []
+    full_cards: set[int] = set()
+    launched = 0
+
+    while launched < threads_max and len(full_cards) < len(gpus):
+        for g in gpus:
+            if launched >= threads_max or g in full_cards:
+                continue
+            free = guard.free_mib(g)
+            if free is not None and free < guard.reserve_mib:
+                print(
+                    f"[vram] GPU {g}: {free} MiB free < reserve "
+                    f"{guard.reserve_mib} MiB -- no more workers on this card"
+                )
+                full_cards.add(g)
+            else:
+                ready = threading.Event()
+                t = threading.Thread(
+                    target=_gpu_worker, args=(gpu_q, g, launched, stats, ready), daemon=True
+                )
+                t.start()
+                threads.append(t)
+                if not ready.wait(timeout=600):
+                    print(f"[vram] GPU {g}: worker init took >600s; continuing without waiting")
+                launched += 1
+
+    if not threads:
+        raise RuntimeError(
+            "no GPU workers could be started -- every card is below the VRAM reserve"
+        )
+    print(f"[init] vram-aware launch: {launched} GPU worker(s) started (max {threads_max})")
+    return threads
+
+
 def run_pipeline(
     roots: list[dict],
     gpus: list[int],
@@ -424,6 +556,7 @@ def run_pipeline(
     cpu_workers: int,
     fresh: bool,
     batch_size: int | None = None,
+    threads_max: int | None = None,
 ) -> Stats:
     stats = Stats()
     job_id = db.start_job("index_all")
@@ -431,7 +564,6 @@ def run_pipeline(
     decode_q: queue.Queue = queue.Queue(maxsize=config.INDEX_DECODE_QUEUE)
     gpu_q: queue.Queue = queue.Queue(maxsize=config.INDEX_GPU_QUEUE)
 
-    n_gpu_workers = len(gpus) * threads_per_gpu
     budget = _BatchBudget(batch_size)
 
     # Warm the model cache once in the main thread so worker threads do not
@@ -440,10 +572,14 @@ def run_pipeline(
     _warm = FaceEngine(ctx_id=gpus[0])
     del _warm
     batch_note = f" batch_size={batch_size}" if batch_size is not None else ""
-    print(
-        f"[init] gpus={gpus} threads_per_gpu={threads_per_gpu} "
-        f"gpu_workers={n_gpu_workers} cpu_decode_workers={cpu_workers}{batch_note}"
-    )
+    if threads_max is not None:
+        mode_note = (
+            f"threads_max={threads_max} (vram-aware, reserve "
+            f"{config.RESERVE_VRAM_GB:g} GB/card)"
+        )
+    else:
+        mode_note = f"threads_per_gpu={threads_per_gpu} gpu_workers={len(gpus) * threads_per_gpu}"
+    print(f"[init] gpus={gpus} {mode_note} cpu_decode_workers={cpu_workers}{batch_note}")
 
     stop_evt = threading.Event()
     flusher = _StatsFlusher(job_id, stats, stop_evt)
@@ -453,14 +589,21 @@ def run_pipeline(
         threading.Thread(target=_decode_worker, args=(decode_q, gpu_q, stats), daemon=True)
         for _ in range(cpu_workers)
     ]
-    gpu_threads = []
-    for g in gpus:
-        for w in range(threads_per_gpu):
-            t = threading.Thread(target=_gpu_worker, args=(gpu_q, g, w, stats), daemon=True)
-            gpu_threads.append(t)
-
-    for t in decode_threads + gpu_threads:
+    for t in decode_threads:
         t.start()
+
+    if threads_max is not None:
+        # VRAM-aware mode: workers are started one at a time (already running
+        # when this returns); the launcher re-checks free VRAM before each.
+        gpu_threads = _launch_gpu_workers_vram(gpu_q, gpus, threads_max, stats)
+    else:
+        gpu_threads = [
+            threading.Thread(target=_gpu_worker, args=(gpu_q, g, w, stats), daemon=True)
+            for g in gpus
+            for w in range(threads_per_gpu)
+        ]
+        for t in gpu_threads:
+            t.start()
 
     try:
         for root in roots:
@@ -551,8 +694,16 @@ def _print_stats() -> None:
 
 def _add_pipeline_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
-        "--threads-per-gpu", type=int, default=config.THREADS_PER_GPU,
-        help=f"GPU worker threads per GPU (default {config.THREADS_PER_GPU})",
+        "--threads-per-gpu", type=int, default=None, metavar="N",
+        help=f"GPU worker threads per GPU (default {config.THREADS_PER_GPU}; "
+             f"ignored when --threads-max is given)",
+    )
+    p.add_argument(
+        "--threads-max", type=int, default=None, metavar="N",
+        help="start at most N GPU workers total, one at a time across cards "
+             "(round-robin), re-checking free VRAM before each launch and "
+             f"stopping on any card below RESERVE_VRAM ({config.RESERVE_VRAM_GB:g} GB); "
+             "mutually exclusive with --threads-per-gpu",
     )
     p.add_argument("--gpus", default=None, help="comma-separated GPU ids, e.g. 0,1 (default: auto-detect)")
     p.add_argument(
@@ -615,7 +766,19 @@ def main() -> None:
         _print_stats()
     elif args.cmd in ("index-all", "index-root"):
         gpus = _parse_gpus(args.gpus)
-        threads_per_gpu = max(1, int(args.threads_per_gpu))
+        if args.threads_per_gpu is not None and args.threads_max is not None:
+            parser.error("use either --threads-per-gpu or --threads-max, not both")
+        threads_max = args.threads_max
+        if threads_max is not None and threads_max < 1:
+            parser.error("--threads-max must be >= 1")
+        if threads_max is not None:
+            threads_per_gpu = config.THREADS_PER_GPU  # unused in vram-aware mode
+        else:
+            threads_per_gpu = (
+                max(1, int(args.threads_per_gpu))
+                if args.threads_per_gpu is not None
+                else config.THREADS_PER_GPU
+            )
         cpu_workers = max(1, int(args.cpu_workers))
 
         if args.cmd == "index-all":
@@ -634,7 +797,9 @@ def main() -> None:
         batch_size = args.batch_size
         if batch_size is not None and batch_size < 1:
             parser.error("--batch-size must be >= 1")
-        stats = run_pipeline(roots, gpus, threads_per_gpu, cpu_workers, bool(args.fresh), batch_size)
+        stats = run_pipeline(
+            roots, gpus, threads_per_gpu, cpu_workers, bool(args.fresh), batch_size, threads_max
+        )
         snap = stats.snapshot()
         print(f"finished: {snap}")
         if snap["errors"]:

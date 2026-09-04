@@ -137,6 +137,8 @@ GPUS = _detect_gpus()
 
 # --- indexing pipeline (index_cli) ---
 THREADS_PER_GPU = int(os.getenv("THREADS_PER_GPU", "4"))
+# VRAM kept free per GPU in --threads-max mode, in GB (decimals allowed).
+RESERVE_VRAM_GB = float(os.getenv("RESERVE_VRAM", "2"))
 INDEX_CPU_WORKERS = int(os.getenv("INDEX_CPU_WORKERS", "8"))
 INDEX_DECODE_QUEUE = int(os.getenv("INDEX_DECODE_QUEUE", "16"))
 INDEX_GPU_QUEUE = int(os.getenv("INDEX_GPU_QUEUE", "8"))

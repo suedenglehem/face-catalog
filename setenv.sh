@@ -31,6 +31,9 @@ SEARCH_LIMIT=50
 
 # --- multi-GPU indexing / grouping (defaults; CLI flags override) ---
 THREADS_PER_GPU=4
+# VRAM in GB kept free per card when index_cli runs with --threads-max: a card
+# whose free memory drops below this gets no more workers scheduled on it.
+RESERVE_VRAM=2
 INDEX_CPU_WORKERS=8
 INDEX_DECODE_QUEUE=16
 INDEX_GPU_QUEUE=8
