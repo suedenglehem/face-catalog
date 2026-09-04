@@ -1,0 +1,27 @@
+# Ignore everything by default
+*
+
+# Exceptions (files)
+!Dockerfile
+!docker-compose.yml
+!docker-compose.db.yml
+!.docker.env
+!Makefile
+!README.md
+!requirements.txt
+!setenv.sh
+!cudas.sh
+
+# Exception: facecat package (un-ignore dir, then ignore its contents,
+# then un-ignore the files we want to keep)
+!facecat/
+facecat/*
+!facecat/__init__.py
+!facecat/config.py
+!facecat/db.py
+!facecat/group_cli.py
+!facecat/imaging.py
+!facecat/index_cli.py
+!facecat/schema.sql
+!facecat/vision.py
+!facecat/webapp.py

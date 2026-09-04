@@ -1,0 +1,18 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: facecat-db
+    environment:
+      POSTGRES_DB: facecat
+      POSTGRES_USER: facecat
+      POSTGRES_PASSWORD: facecat
+    ports:
+      - "5432:5432"
+    volumes:
+      # Same host dir as docker-compose.yml so both files share one DB.
+      - ./pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U facecat -d facecat"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
