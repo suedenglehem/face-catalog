@@ -30,12 +30,20 @@ def load_rgb(path: Path) -> np.ndarray:
     suffix = path.suffix.lower()
 
     if suffix in RAW_EXTS:
-        with rawpy.imread(str(path)) as raw:
-            # Note: rawpy >= 0.20 removed the `auto_bright` kwarg (default off).
-            rgb = raw.postprocess(
-                use_camera_wb=True,
-                output_bps=8,
-            )
+        try:
+            with rawpy.imread(str(path)) as raw:
+                # Note: rawpy >= 0.20 removed the `auto_bright` kwarg (default off).
+                rgb = raw.postprocess(
+                    use_camera_wb=True,
+                    output_bps=8,
+                )
+        except rawpy.LibRawError as exc:
+            # rawpy raises with a bytes message (e.g. b'Unsupported file format
+            # or not RAW file'), which logs as "b'...'" - re-raise decoded.
+            msg = exc.args[0] if exc.args else str(exc)
+            if isinstance(msg, bytes):
+                msg = msg.decode("utf-8", "replace")
+            raise type(exc)(msg) from None
         return rgb
 
     with Image.open(path) as im:
