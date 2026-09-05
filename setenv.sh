@@ -18,6 +18,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE:-.}")" && pwd)"
 set -a
 DATABASE_URL="postgresql://facecat:facecat@127.0.0.1:5432/facecat"
 THUMBS_DIR="$REPO_DIR/thumbs"
+LOGS_DIR="$REPO_DIR/logs"
 MODEL_NAME="buffalo_l"
 GPU_DEVICE_ID=0
 DET_SIZE=640

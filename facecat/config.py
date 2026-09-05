@@ -21,6 +21,9 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 THUMBS_DIR = Path(os.getenv("THUMBS_DIR", "./data/thumbs")).resolve()
 THUMBS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Directory for per-run index logs (index_cli writes log-<timestamp>.log here).
+LOGS_DIR = Path(os.getenv("LOGS_DIR", "logs")).resolve()
+
 MODEL_NAME = os.getenv("MODEL_NAME", "buffalo_l")
 GPU_DEVICE_ID = int(os.getenv("GPU_DEVICE_ID", "0"))
 DET_SIZE = int(os.getenv("DET_SIZE", "640"))

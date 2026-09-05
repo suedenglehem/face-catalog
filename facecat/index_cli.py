@@ -31,12 +31,13 @@ log = logging.getLogger("facecat.index")
 
 
 def _setup_logging() -> Path:
-    """Point the module logger at logs/log-<firing time>.log plus stdout.
+    """Point the module logger at $LOGS_DIR/log-<firing time>.log plus stdout.
 
     Every index run gets its own file named after when it was fired, so a
     re-run after an interruption never mixes with the previous run's log.
+    The directory comes from LOGS_DIR (setenv.sh), defaulting to ./logs.
     """
-    logs_dir = Path("logs")
+    logs_dir = config.LOGS_DIR
     logs_dir.mkdir(parents=True, exist_ok=True)
     path = logs_dir / f"log-{datetime.now():%Y%m%d-%H%M%S}.log"
     log.setLevel(logging.INFO)
