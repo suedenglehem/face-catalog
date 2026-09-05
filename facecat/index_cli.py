@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import queue
+import signal
 import subprocess
+import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +26,26 @@ from .vision import FaceEngine
 # ---------------------------------------------------------------------------
 # Shared state
 # ---------------------------------------------------------------------------
+
+log = logging.getLogger("facecat.index")
+
+
+def _setup_logging() -> Path:
+    """Point the module logger at logs/log-<firing time>.log plus stdout.
+
+    Every index run gets its own file named after when it was fired, so a
+    re-run after an interruption never mixes with the previous run's log.
+    """
+    logs_dir = Path("logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / f"log-{datetime.now():%Y%m%d-%H%M%S}.log"
+    log.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    for handler in (logging.FileHandler(path, encoding="utf-8"), logging.StreamHandler(sys.stdout)):
+        handler.setFormatter(formatter)
+        log.addHandler(handler)
+    return path
+
 
 @dataclass
 class FileTask:
@@ -90,6 +114,9 @@ def _connect() -> psycopg.Connection:
     db.ensure_vector(conn)
     db.ensure_schema(conn)
     register_vector(conn)
+    # Same as db.connect(): leave the connection idle so per-file
+    # conn.transaction() blocks are real commit boundaries, not savepoints.
+    conn.commit()
     return conn
 
 
@@ -224,8 +251,12 @@ def _save_file_thumb(task: FileTask) -> str:
     return thumb_rel
 
 
-def _decode_worker(decode_q: queue.Queue, gpu_q: queue.Queue, stats: Stats) -> None:
+def _decode_worker(
+    decode_q: queue.Queue, gpu_q: queue.Queue, stats: Stats, stop_evt: threading.Event
+) -> None:
     while True:
+        if stop_evt.is_set():
+            break  # Ctrl-C: leave the rest of the queue for the next run
         task = decode_q.get()
         try:
             if task is None:
@@ -236,9 +267,17 @@ def _decode_worker(decode_q: queue.Queue, gpu_q: queue.Queue, stats: Stats) -> N
             thumb_rel = _save_file_thumb(task)
             imaging.save_jpeg(rgb, config.THUMBS_DIR / thumb_rel, (320, 320))
 
-            gpu_q.put((task, rgb, exif, thumb_rel))
+            # Bounded put: on Ctrl-C the GPU workers may already have exited,
+            # so an unbounded put() would block forever once gpu_q is full.
+            while True:
+                try:
+                    gpu_q.put((task, rgb, exif, thumb_rel), timeout=1.0)
+                    break
+                except queue.Full:
+                    if stop_evt.is_set():
+                        return  # GPU side is gone; this file waits for the next run
         except Exception as exc:
-            print(f"[decode] {task.abs_path}: {exc}")
+            log.error("[decode] %s: %s", task.abs_path, exc)
             stats.inc("errors")
         finally:
             decode_q.task_done()
@@ -259,76 +298,79 @@ def _process_file(
 ) -> None:
     h, w = rgb.shape[:2]
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            insert into files (
-                root_id, rel_path, abs_path, file_size, mtime,
-                width, height, exif, file_thumb_rel, indexed_at, last_seen_at, is_deleted
-            ) values (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, now(), now(), false)
-            on conflict (abs_path) do update set
-                root_id = excluded.root_id,
-                rel_path = excluded.rel_path,
-                file_size = excluded.file_size,
-                mtime = excluded.mtime,
-                width = excluded.width,
-                height = excluded.height,
-                exif = excluded.exif,
-                file_thumb_rel = excluded.file_thumb_rel,
-                indexed_at = now(),
-                last_seen_at = now(),
-                is_deleted = false
-            returning id
-            """,
-            (
-                task.root_id,
-                task.rel_path,
-                str(task.abs_path),
-                task.size,
-                _mtime_to_tz(task.mtime),
-                w,
-                h,
-                json.dumps(exif),
-                thumb_rel,
-            ),
-        )
-        file_id = int(cur.fetchone()["id"])
-
-    with conn.cursor() as cur:
-        cur.execute("delete from faces where file_id = %s", (file_id,))
-
+    # All CPU/GPU work happens before the first DB write. The whole file then
+    # lands in a single transaction (one commit), so an interrupted run can
+    # never leave a half-written files/faces pair behind: either everything
+    # below is committed or Postgres rolls it all back on disconnect.
     resized, scale = imaging.resize_for_detector(rgb, config.MAX_DETECT_SIDE)
     faces = engine.detect(resized)
 
-    with conn.cursor() as cur:
-        for i, face in enumerate(faces):
-            box = [int(x * scale) for x in face["bbox"]]
-            crop = imaging.crop_face(rgb, box)
-            face_thumb_rel = f"faces/{file_id}_{i}.jpg"
-            imaging.save_jpeg(crop, config.THUMBS_DIR / face_thumb_rel, (256, 256))
-
+    with conn.transaction():
+        with conn.cursor() as cur:
             cur.execute(
                 """
-                insert into faces (
-                    file_id, face_index, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
-                    det_score, quality_score, embedding, face_thumb_rel
-                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s)
+                insert into files (
+                    root_id, rel_path, abs_path, file_size, mtime,
+                    width, height, exif, file_thumb_rel, indexed_at, last_seen_at, is_deleted
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, now(), now(), false)
+                on conflict (abs_path) do update set
+                    root_id = excluded.root_id,
+                    rel_path = excluded.rel_path,
+                    file_size = excluded.file_size,
+                    mtime = excluded.mtime,
+                    width = excluded.width,
+                    height = excluded.height,
+                    exif = excluded.exif,
+                    file_thumb_rel = excluded.file_thumb_rel,
+                    indexed_at = now(),
+                    last_seen_at = now(),
+                    is_deleted = false
+                returning id
                 """,
                 (
-                    file_id,
-                    i,
-                    box[0],
-                    box[1],
-                    box[2],
-                    box[3],
-                    face["det_score"],
-                    face["quality_score"],
-                    face["embedding"].tolist(),
-                    face_thumb_rel,
+                    task.root_id,
+                    task.rel_path,
+                    str(task.abs_path),
+                    task.size,
+                    _mtime_to_tz(task.mtime),
+                    w,
+                    h,
+                    json.dumps(exif),
+                    thumb_rel,
                 ),
             )
+            file_id = int(cur.fetchone()["id"])
 
-    conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("delete from faces where file_id = %s", (file_id,))
+            for i, face in enumerate(faces):
+                box = [int(x * scale) for x in face["bbox"]]
+                crop = imaging.crop_face(rgb, box)
+                face_thumb_rel = f"faces/{file_id}_{i}.jpg"
+                imaging.save_jpeg(crop, config.THUMBS_DIR / face_thumb_rel, (256, 256))
+
+                cur.execute(
+                    """
+                    insert into faces (
+                        file_id, face_index, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+                        det_score, quality_score, embedding, face_thumb_rel
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s)
+                    """,
+                    (
+                        file_id,
+                        i,
+                        box[0],
+                        box[1],
+                        box[2],
+                        box[3],
+                        face["det_score"],
+                        face["quality_score"],
+                        face["embedding"].tolist(),
+                        face_thumb_rel,
+                    ),
+                )
+
+    log.info("indexed %s faces=%d", task.abs_path, len(faces))
     stats.inc("files_reindexed")
     stats.inc("faces_found", len(faces))
 
@@ -339,6 +381,7 @@ def _gpu_worker(
     worker_idx: int,
     stats: Stats,
     ready_evt: threading.Event | None = None,
+    stop_evt: threading.Event | None = None,
 ) -> None:
     # Engine is created inside the worker thread so its CUDA context and
     # ONNX session are bound to this thread / device. In --threads-max mode
@@ -350,7 +393,7 @@ def _gpu_worker(
         engine = FaceEngine(ctx_id=gpu_id)
         conn = _connect()
     except Exception as exc:
-        print(f"[gpu{gpu_id}/w{worker_idx}] init failed: {exc}")
+        log.error("[gpu%d/w%d] init failed: %s", gpu_id, worker_idx, exc)
         if ready_evt is not None:
             ready_evt.set()
         return
@@ -358,6 +401,8 @@ def _gpu_worker(
         ready_evt.set()
 
     while True:
+        if stop_evt is not None and stop_evt.is_set():
+            break  # Ctrl-C: leave the rest of the queue for the next run
         item = gpu_q.get()
         try:
             if item is None:
@@ -365,7 +410,7 @@ def _gpu_worker(
             task, rgb, exif, thumb_rel = item
             _process_file(conn, engine, task, rgb, exif, thumb_rel, stats)
         except Exception as exc:
-            print(f"[gpu{gpu_id}/w{worker_idx}] {getattr(item[0], 'abs_path', '?')}: {exc}")
+            log.error("[gpu%d/w%d] %s: %s", gpu_id, worker_idx, getattr(item[0], "abs_path", "?"), exc)
             try:
                 conn.rollback()
             except Exception:
@@ -504,7 +549,9 @@ def _launch_gpu_workers_vram(
     gpus: list[int],
     threads_max: int,
     stats: Stats,
-) -> list[threading.Thread]:
+    stop_evt: threading.Event,
+    threads: list[threading.Thread],
+) -> None:
     """Start up to `threads_max` GPU workers one at a time, VRAM-gated.
 
     Cards are visited round-robin; before each launch the card's free VRAM is
@@ -513,9 +560,11 @@ def _launch_gpu_workers_vram(
     so every check sees all previously started engines' memory already
     allocated. Note the last worker on a card may still push free VRAM below
     the reserve -- the guard only gates *further* launches.
+
+    Launched threads are appended to `threads` (owned by run_pipeline) as they
+    start, so an interruption mid-launch can still join every started worker.
     """
     guard = _VramGuard(gpus, int(config.RESERVE_VRAM_GB * 1024))
-    threads: list[threading.Thread] = []
     full_cards: set[int] = set()
     launched = 0
 
@@ -533,7 +582,7 @@ def _launch_gpu_workers_vram(
             else:
                 ready = threading.Event()
                 t = threading.Thread(
-                    target=_gpu_worker, args=(gpu_q, g, launched, stats, ready), daemon=True
+                    target=_gpu_worker, args=(gpu_q, g, launched, stats, ready, stop_evt), daemon=True
                 )
                 t.start()
                 threads.append(t)
@@ -546,7 +595,6 @@ def _launch_gpu_workers_vram(
             "no GPU workers could be started -- every card is below the VRAM reserve"
         )
     print(f"[init] vram-aware launch: {launched} GPU worker(s) started (max {threads_max})")
-    return threads
 
 
 def run_pipeline(
@@ -558,6 +606,9 @@ def run_pipeline(
     batch_size: int | None = None,
     threads_max: int | None = None,
 ) -> Stats:
+    log_path = _setup_logging()
+    print(f"[init] logging to {log_path}")
+
     stats = Stats()
     job_id = db.start_job("index_all")
 
@@ -580,32 +631,53 @@ def run_pipeline(
     else:
         mode_note = f"threads_per_gpu={threads_per_gpu} gpu_workers={len(gpus) * threads_per_gpu}"
     print(f"[init] gpus={gpus} {mode_note} cpu_decode_workers={cpu_workers}{batch_note}")
+    log.info(
+        "index started: job=%d gpus=%s %s cpu_decode_workers=%d%s",
+        job_id, gpus, mode_note, cpu_workers, batch_note,
+    )
 
     stop_evt = threading.Event()
     flusher = _StatsFlusher(job_id, stats, stop_evt)
     flusher.start()
 
     decode_threads = [
-        threading.Thread(target=_decode_worker, args=(decode_q, gpu_q, stats), daemon=True)
+        threading.Thread(target=_decode_worker, args=(decode_q, gpu_q, stats, stop_evt), daemon=True)
         for _ in range(cpu_workers)
     ]
     for t in decode_threads:
         t.start()
 
-    if threads_max is not None:
-        # VRAM-aware mode: workers are started one at a time (already running
-        # when this returns); the launcher re-checks free VRAM before each.
-        gpu_threads = _launch_gpu_workers_vram(gpu_q, gpus, threads_max, stats)
-    else:
-        gpu_threads = [
-            threading.Thread(target=_gpu_worker, args=(gpu_q, g, w, stats), daemon=True)
-            for g in gpus
-            for w in range(threads_per_gpu)
-        ]
-        for t in gpu_threads:
-            t.start()
+    # Ctrl-C handling: the first press raises KeyboardInterrupt (caught below
+    # for an orderly stop); a second press SIGKILLs the whole process group so
+    # nothing can survive - including workers wedged inside C-level CUDA calls.
+    sigint_presses = 0
+    prev_sigint = signal.getsignal(signal.SIGINT)
 
+    def _on_sigint(signum, frame):
+        nonlocal sigint_presses
+        sigint_presses += 1
+        if sigint_presses == 1:
+            print("\n[ctrl-c] stopping after in-flight files finish (Ctrl-C again to force-kill)...", flush=True)
+            raise KeyboardInterrupt
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+
+    signal.signal(signal.SIGINT, _on_sigint)
+
+    gpu_threads: list[threading.Thread] = []
     try:
+        if threads_max is not None:
+            # VRAM-aware mode: workers are started one at a time (already running
+            # when this returns); the launcher re-checks free VRAM before each.
+            _launch_gpu_workers_vram(gpu_q, gpus, threads_max, stats, stop_evt, gpu_threads)
+        else:
+            for g in gpus:
+                for w in range(threads_per_gpu):
+                    t = threading.Thread(
+                        target=_gpu_worker, args=(gpu_q, g, w, stats, None, stop_evt), daemon=True
+                    )
+                    t.start()
+                    gpu_threads.append(t)
+
         for root in roots:
             root_id = int(root["id"])
             root_path = Path(str(root["path"]))
@@ -623,11 +695,13 @@ def run_pipeline(
             mark_missing_deleted(root_id, seen_paths)
             touch_root_indexed(root_id)
             stats.inc("roots_done")
-            print(
-                f"[done] root {root_id}: seen={stats.files_seen} "
+            done_msg = (
+                f"root {root_id}: seen={stats.files_seen} "
                 f"skipped_unchanged={stats.files_skipped} reindexed={stats.files_reindexed} "
                 f"faces={stats.faces_found} errors={stats.errors}"
             )
+            print(f"[done] {done_msg}")
+            log.info("scan done: %s", done_msg)
 
         # Shut down worker pools.
         for _ in decode_threads:
@@ -638,6 +712,34 @@ def run_pipeline(
             t.join(timeout=600)
 
         db.finish_job(job_id, "done")
+        log.info("index finished: %s", stats.snapshot())
+    except KeyboardInterrupt:
+        # Orderly stop: workers finish the file they are on (per-file commits
+        # keep the DB consistent either way), then exit at their next loop
+        # check. Sentinels wake any worker blocked in get(); put_nowait so a
+        # full queue can't deadlock the shutdown itself.
+        stop_evt.set()
+        for q, n in ((decode_q, len(decode_threads)), (gpu_q, len(gpu_threads))):
+            for _ in range(n):
+                try:
+                    q.put_nowait(None)
+                except queue.Full:
+                    pass
+        deadline = time.monotonic() + 60
+        for t in decode_threads + gpu_threads:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+        stuck = [t for t in decode_threads + gpu_threads if t.is_alive()]
+        try:
+            db.finish_job(job_id, "interrupted", error="Ctrl-C")
+        except Exception:
+            pass
+        log.info("index interrupted by Ctrl-C: %s", stats.snapshot())
+        print(f"[ctrl-c] stopped - re-run the same command to continue (log: {log_path})", flush=True)
+        if stuck:
+            # A worker wedged in a C-level call won't see stop_evt; nuke the
+            # whole process group (this python plus any children) so nothing lingers.
+            print(f"[ctrl-c] {len(stuck)} worker(s) still running after 60s - force-killing process group", flush=True)
+            os.killpg(os.getpgrp(), signal.SIGKILL)
     except Exception as exc:
         # Leave the job row 'running' so a re-run reclaims it; per-file
         # commits already persisted are skipped on continuation.
@@ -649,6 +751,7 @@ def run_pipeline(
         raise
     finally:
         stop_evt.set()
+        signal.signal(signal.SIGINT, prev_sigint)
 
     return stats
 

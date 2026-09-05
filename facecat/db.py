@@ -56,6 +56,11 @@ def connect():
     ensure_vector(conn)
     ensure_schema(conn)
     register_vector(conn)
+    # TypeInfo.fetch() inside register_vector() runs SELECTs and leaves an
+    # implicit transaction open; commit so callers start idle - otherwise a
+    # later conn.transaction() would only create a savepoint in that open
+    # transaction instead of a real commit boundary.
+    conn.commit()
     return conn
 
 

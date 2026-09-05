@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from insightface.app import FaceAnalysis
 
 from . import config
+
+# scikit-image >= 0.26 deprecates SimilarityTransform.estimate, which
+# insightface calls once per detected face (utils/face_align.py) - without
+# this filter every indexed photo spams a FutureWarning to stderr.
+warnings.filterwarnings("ignore", message=r"`?estimate`? is deprecated")
 
 
 class FaceEngine:
